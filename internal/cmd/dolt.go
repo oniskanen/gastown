@@ -283,6 +283,32 @@ Examples:
 	RunE: runDoltCleanup,
 }
 
+var doltBackupPruneCmd = &cobra.Command{
+	Use:   "backup-prune [<db>]",
+	Short: "Remove orphan chunk files from Dolt backup targets",
+	Long: `Remove orphan NBS chunk and staging files from Dolt backup target directories.
+
+When ` + "`dolt backup sync`" + ` runs against a busy database, older archive
+(.darc) chunks get replaced and intermediate NBS table files (nbs_table_*,
+nbs_manifest_*) are written. Upstream Dolt has no garbage-collection step
+for backup targets, so over time these unreferenced files accumulate and
+fill the disk — by roughly 2× db_size per interrupted cycle.
+
+This command parses each backup target's manifest, lists the on-disk files,
+and deletes any that are NOT referenced from the manifest. Only file://
+backup remotes are pruned; remote object stores are out of scope.
+
+If a database name is given, only its backup targets are pruned. With no
+argument, all rig databases with file:// backup remotes are scanned.
+
+Examples:
+  gt dolt backup-prune                 # Prune backup targets for all dbs
+  gt dolt backup-prune hq              # Prune only the hq backup target(s)
+  gt dolt backup-prune --dry-run       # Preview what would be removed`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runDoltBackupPrune,
+}
+
 var doltRollbackCmd = &cobra.Command{
 	Use:   "rollback [backup-dir]",
 	Short: "Restore .beads directories from a migration backup",
@@ -326,9 +352,10 @@ After migration, 'bd mol wisp list' will work and agent lifecycle
 var (
 	doltLogLines     int
 	doltLogFollow    bool
-	doltMigrateDry   bool
-	doltCleanupDry   bool
-	doltCleanupForce bool
+	doltMigrateDry      bool
+	doltCleanupDry      bool
+	doltCleanupForce    bool
+	doltBackupPruneDry  bool
 
 	doltMigrateWispsDry bool
 	doltMigrateWispsDB  string
@@ -358,6 +385,7 @@ func init() {
 	doltCmd.AddCommand(doltFixMetadataCmd)
 	doltCmd.AddCommand(doltRecoverCmd)
 	doltCmd.AddCommand(doltCleanupCmd)
+	doltCmd.AddCommand(doltBackupPruneCmd)
 	doltCmd.AddCommand(doltRollbackCmd)
 	doltCmd.AddCommand(doltSyncCmd)
 	doltCmd.AddCommand(doltPullCmd)
@@ -367,6 +395,7 @@ func init() {
 
 	doltCleanupCmd.Flags().BoolVar(&doltCleanupDry, "dry-run", false, "Preview what would be removed without making changes")
 	doltCleanupCmd.Flags().BoolVar(&doltCleanupForce, "force", false, "Remove databases even if they have user tables")
+	doltBackupPruneCmd.Flags().BoolVar(&doltBackupPruneDry, "dry-run", false, "Preview orphan files without deleting them")
 	doltLogsCmd.Flags().IntVarP(&doltLogLines, "lines", "n", 50, "Number of lines to show")
 	doltLogsCmd.Flags().BoolVarP(&doltLogFollow, "follow", "f", false, "Follow log output")
 
@@ -1040,6 +1069,86 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n%s Removed %d/%d orphaned database(s)\n",
 		style.Bold.Render("✓"), removed, len(orphans))
 
+	return nil
+}
+
+func runDoltBackupPrune(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	config := doltserver.DefaultConfig(townRoot)
+
+	var databases []string
+	if len(args) == 1 {
+		databases = []string{args[0]}
+	} else {
+		all, err := doltserver.ListDatabases(townRoot)
+		if err != nil {
+			return fmt.Errorf("listing databases: %w", err)
+		}
+		databases = all
+	}
+	if len(databases) == 0 {
+		fmt.Printf("%s No databases found in %s\n", style.Bold.Render("✓"), config.DataDir)
+		return nil
+	}
+
+	totalDeleted := 0
+	var totalBytes int64
+	scannedTargets := 0
+
+	for _, db := range databases {
+		dbDir := filepath.Join(config.DataDir, db)
+		if _, err := os.Stat(dbDir); err != nil {
+			fmt.Printf("  %s %s: %v\n", style.Bold.Render("✗"), db, err)
+			continue
+		}
+		targets, err := doltserver.ListFileBackupTargets(dbDir)
+		if err != nil {
+			fmt.Printf("  %s %s: %v\n", style.Bold.Render("✗"), db, err)
+			continue
+		}
+		if len(targets) == 0 {
+			continue
+		}
+		for _, t := range targets {
+			scannedTargets++
+			res, err := doltserver.PruneBackupTarget(t.Path, doltBackupPruneDry)
+			if err != nil {
+				fmt.Printf("  %s %s/%s: %v\n", style.Bold.Render("✗"), db, t.Name, err)
+				continue
+			}
+
+			label := "Pruned"
+			if doltBackupPruneDry {
+				label = "Would prune"
+			}
+			fmt.Printf("  %s %s %s/%s (%s): %d orphan file(s), %s\n",
+				style.Bold.Render("✓"), label, db, t.Name,
+				style.Dim.Render(t.Path),
+				len(res.Deleted), formatBytes(res.BytesFreed))
+			totalDeleted += len(res.Deleted)
+			totalBytes += res.BytesFreed
+		}
+	}
+
+	if scannedTargets == 0 {
+		fmt.Printf("%s No file:// backup targets found across %d database(s)\n",
+			style.Bold.Render("✓"), len(databases))
+		return nil
+	}
+
+	verb := "Removed"
+	if doltBackupPruneDry {
+		verb = "Identified"
+	}
+	fmt.Printf("\n%s %s %d orphan file(s) across %d backup target(s) — %s freed\n",
+		style.Bold.Render("✓"), verb, totalDeleted, scannedTargets, formatBytes(totalBytes))
+	if doltBackupPruneDry && totalDeleted > 0 {
+		fmt.Printf("  Re-run without --dry-run to actually delete.\n")
+	}
 	return nil
 }
 

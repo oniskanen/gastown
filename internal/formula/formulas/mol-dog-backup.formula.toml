@@ -7,6 +7,9 @@ rsyncs the local backup directory to iCloud Drive for offsite replication.
 Current behavior (from dolt_backup.go):
 - Discovers databases with backup remotes configured
 - Runs `dolt backup sync <name>-backup` per database
+- Prunes orphan NBS chunk/staging files from each file:// backup
+  target after a successful sync (upstream Dolt has no `dolt backup
+  gc`; without this, interrupted syncs leak ~2× db_size per cycle)
 - Rsyncs .dolt-backup/ to iCloud Drive
 
 ## Dog Contract

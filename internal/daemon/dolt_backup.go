@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -83,6 +84,12 @@ func (d *Daemon) syncDoltBackups() {
 			failures = append(failures, db)
 		} else {
 			synced++
+			// Prune orphan chunk/staging files from each file:// backup
+			// target. Upstream Dolt has no `dolt backup gc`, so without
+			// this step interrupted syncs leave behind nbs_table_* and
+			// stale .darc files that grow the target by ~2× db_size per
+			// cycle (gc-rj02a / disk-fill outage 2026-05-02).
+			d.pruneBackupTargets(dataDir, db)
 		}
 	}
 
@@ -123,6 +130,30 @@ func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
 
 	d.logger.Printf("dolt_backup: %s: synced to %s", db, backupName)
 	return nil
+}
+
+// pruneBackupTargets removes orphan NBS chunk and staging files from each
+// of the database's file:// backup targets. Errors are logged but never
+// fatal — pruning is a hygiene step, not a precondition for backup
+// validity.
+func (d *Daemon) pruneBackupTargets(dataDir, db string) {
+	dbDir := filepath.Join(dataDir, db)
+	targets, err := doltserver.ListFileBackupTargets(dbDir)
+	if err != nil {
+		d.logger.Printf("dolt_backup: %s: list backup targets failed: %v", db, err)
+		return
+	}
+	for _, t := range targets {
+		res, err := doltserver.PruneBackupTarget(t.Path, false)
+		if err != nil {
+			d.logger.Printf("dolt_backup: %s/%s: prune failed: %v", db, t.Name, err)
+			continue
+		}
+		if len(res.Deleted) > 0 {
+			d.logger.Printf("dolt_backup: %s/%s: pruned %d orphan file(s), %d bytes freed",
+				db, t.Name, len(res.Deleted), res.BytesFreed)
+		}
+	}
 }
 
 // syncOffsiteBackup rsyncs the local backup directory to iCloud Drive.
