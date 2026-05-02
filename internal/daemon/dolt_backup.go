@@ -88,7 +88,7 @@ func (d *Daemon) syncDoltBackups() {
 			// target. Upstream Dolt has no `dolt backup gc`, so without
 			// this step interrupted syncs leave behind nbs_table_* and
 			// stale .darc files that grow the target by ~2× db_size per
-			// cycle (gc-rj02a / disk-fill outage 2026-05-02).
+			// cycle.
 			d.pruneBackupTargets(dataDir, db)
 		}
 	}

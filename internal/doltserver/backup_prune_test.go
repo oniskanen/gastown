@@ -256,10 +256,10 @@ func TestPruneBackupTarget_MissingManifest(t *testing.T) {
 }
 
 // TestPruneBackupTarget_BoundedAcrossInterruptedSyncs is the regression
-// test for gc-rj02a / gastown bug: simulate the failure mode that fills
-// disks (interrupted `dolt backup sync` leaves nbs_table_* + old .darcs
-// behind) and verify that running the prune after each cycle keeps the
-// target directory size bounded.
+// test for the orphan-accumulation bug: simulate the failure mode that
+// fills disks (interrupted `dolt backup sync` leaves nbs_table_* + old
+// .darcs behind) and verify that running the prune after each cycle
+// keeps the target directory size bounded.
 //
 // Without prune, each cycle adds ~2× orphan_size of garbage; with prune,
 // the target size never exceeds the current manifest's chunk total.
